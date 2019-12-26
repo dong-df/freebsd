@@ -95,7 +95,6 @@ SYSCTL_VNET_PCPUSTAT(_net_inet_esp, IPSECCTL_STATS, stats,
     "ESP statistics (struct espstat, netipsec/esp_var.h");
 
 static struct timeval deswarn, blfwarn, castwarn, camelliawarn;
-static struct timeval warninterval = { .tv_sec = 1, .tv_usec = 0 };
 
 static int esp_input_cb(struct cryptop *op);
 static int esp_output_cb(struct cryptop *crp);
@@ -162,19 +161,19 @@ esp_init(struct secasvar *sav, struct xformsw *xsp)
 
 	switch (sav->alg_enc) {
 	case SADB_EALG_DESCBC:
-		if (ratecheck(&deswarn, &warninterval))
+		if (ratecheck(&deswarn, &ipsec_warn_interval))
 			gone_in(13, "DES cipher for IPsec");
 		break;
 	case SADB_X_EALG_BLOWFISHCBC:
-		if (ratecheck(&blfwarn, &warninterval))
+		if (ratecheck(&blfwarn, &ipsec_warn_interval))
 			gone_in(13, "Blowfish cipher for IPsec");
 		break;
 	case SADB_X_EALG_CAST128CBC:
-		if (ratecheck(&castwarn, &warninterval))
+		if (ratecheck(&castwarn, &ipsec_warn_interval))
 			gone_in(13, "CAST cipher for IPsec");
 		break;
 	case SADB_X_EALG_CAMELLIACBC:
-		if (ratecheck(&camelliawarn, &warninterval))
+		if (ratecheck(&camelliawarn, &ipsec_warn_interval))
 			gone_in(13, "Camellia cipher for IPsec");
 		break;
 	}
@@ -308,8 +307,17 @@ esp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 		ESPSTAT_INC(esps_badilen);
 		goto bad;
 	}
-	/* XXX don't pullup, just copy header */
-	IP6_EXTHDR_GET(esp, struct newesp *, m, skip, sizeof (struct newesp));
+
+	if (m->m_len < skip + sizeof(*esp)) {
+		m = m_pullup(m, skip + sizeof(*esp));
+		if (m == NULL) {
+			DPRINTF(("%s: cannot pullup header\n", __func__));
+			ESPSTAT_INC(esps_hdrops);	/*XXX*/
+			error = ENOBUFS;
+			goto bad;
+		}
+	}
+	esp = (struct newesp *)(mtod(m, caddr_t) + skip);
 
 	esph = sav->tdb_authalgxform;
 	espx = sav->tdb_encalgxform;
@@ -607,6 +615,13 @@ esp_input_cb(struct cryptop *crp)
 			goto bad;
 		}
 	}
+
+	/*
+	 * RFC4303 2.6:
+	 * Silently drop packet if next header field is IPPROTO_NONE.
+	 */
+	if (lastthree[2] == IPPROTO_NONE)
+		goto bad;
 
 	/* Trim the mbuf chain to remove trailing authenticator and padding */
 	m_adj(m, -(lastthree[1] + 2));

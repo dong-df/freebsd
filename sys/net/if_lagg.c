@@ -23,6 +23,7 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_inet.h"
 #include "opt_inet6.h"
+#include "opt_kern_tls.h"
 #include "opt_ratelimit.h"
 
 #include <sys/param.h>
@@ -135,7 +136,7 @@ static void	lagg_port2req(struct lagg_port *, struct lagg_reqport *);
 static void	lagg_init(void *);
 static void	lagg_stop(struct lagg_softc *);
 static int	lagg_ioctl(struct ifnet *, u_long, caddr_t);
-#ifdef RATELIMIT
+#if defined(KERN_TLS) || defined(RATELIMIT)
 static int	lagg_snd_tag_alloc(struct ifnet *,
 		    union if_snd_tag_alloc_params *,
 		    struct m_snd_tag **);
@@ -144,6 +145,8 @@ static int	lagg_snd_tag_modify(struct m_snd_tag *,
 static int	lagg_snd_tag_query(struct m_snd_tag *,
 		    union if_snd_tag_query_params *);
 static void	lagg_snd_tag_free(struct m_snd_tag *);
+static void     lagg_ratelimit_query(struct ifnet *,
+		    struct if_ratelimit_query_results *);
 #endif
 static int	lagg_setmulti(struct lagg_port *);
 static int	lagg_clrmulti(struct lagg_port *);
@@ -532,11 +535,12 @@ lagg_clone_create(struct if_clone *ifc, int unit, caddr_t params)
 	ifp->if_ioctl = lagg_ioctl;
 	ifp->if_get_counter = lagg_get_counter;
 	ifp->if_flags = IFF_SIMPLEX | IFF_BROADCAST | IFF_MULTICAST;
-#ifdef RATELIMIT
+#if defined(KERN_TLS) || defined(RATELIMIT)
 	ifp->if_snd_tag_alloc = lagg_snd_tag_alloc;
 	ifp->if_snd_tag_modify = lagg_snd_tag_modify;
 	ifp->if_snd_tag_query = lagg_snd_tag_query;
 	ifp->if_snd_tag_free = lagg_snd_tag_free;
+	ifp->if_ratelimit_query = lagg_ratelimit_query;
 #endif
 	ifp->if_capenable = ifp->if_capabilities = IFCAP_HWSTATS;
 
@@ -1241,23 +1245,38 @@ lagg_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			CK_SLIST_FOREACH(lp, &sc->sc_ports, lp_entries)
 				ro->ro_active += LAGG_PORTACTIVE(lp);
 		}
-		ro->ro_bkt = sc->sc_bkt;
+		ro->ro_bkt = sc->sc_stride;
 		ro->ro_flapping = sc->sc_flapping;
 		ro->ro_flowid_shift = sc->flowid_shift;
 		LAGG_XUNLOCK(sc);
 		break;
 	case SIOCSLAGGOPTS:
-		if (sc->sc_proto == LAGG_PROTO_ROUNDROBIN) {
-			if (ro->ro_bkt == 0)
-				sc->sc_bkt = 1; // Minimum 1 packet per iface.
-			else
-				sc->sc_bkt = ro->ro_bkt;
-		}
 		error = priv_check(td, PRIV_NET_LAGG);
 		if (error)
 			break;
-		if (ro->ro_opts == 0)
+
+		/*
+		 * The stride option was added without defining a corresponding
+		 * LAGG_OPT flag, so we must handle it before processing any
+		 * remaining options.
+		 */
+		LAGG_XLOCK(sc);
+		if (ro->ro_bkt != 0) {
+			if (sc->sc_proto != LAGG_PROTO_ROUNDROBIN) {
+				LAGG_XUNLOCK(sc);
+				error = EINVAL;
+				break;
+			}
+			sc->sc_stride = ro->ro_bkt;
+		} else {
+			sc->sc_stride = 0;
+		}
+
+		if (ro->ro_opts == 0) {
+			LAGG_XUNLOCK(sc);
 			break;
+		}
+
 		/*
 		 * Set options.  LACP options are stored in sc->sc_psc,
 		 * not in sc_opts.
@@ -1287,8 +1306,6 @@ lagg_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			valid = lacp = 0;
 			break;
 		}
-
-		LAGG_XLOCK(sc);
 
 		if (valid == 0 ||
 		    (lacp == 1 && sc->sc_proto != LAGG_PROTO_LACP)) {
@@ -1547,7 +1564,7 @@ lagg_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	return (error);
 }
 
-#ifdef RATELIMIT
+#if defined(KERN_TLS) || defined(RATELIMIT)
 static inline struct lagg_snd_tag *
 mst_to_lst(struct m_snd_tag *mst)
 {
@@ -1670,6 +1687,20 @@ lagg_snd_tag_free(struct m_snd_tag *mst)
 	free(lst, M_LAGG);
 }
 
+static void
+lagg_ratelimit_query(struct ifnet *ifp __unused, struct if_ratelimit_query_results *q)
+{
+	/*
+	 * For lagg, we have an indirect
+	 * interface. The caller needs to
+	 * get a ratelimit tag on the actual
+	 * interface the flow will go on.
+	 */
+	q->rate_table = NULL;
+	q->flags = RT_IS_INDIRECT;
+	q->max_flows = 0;
+	q->number_of_rates = 0;
+}
 #endif
 
 static int
@@ -1794,7 +1825,7 @@ lagg_transmit(struct ifnet *ifp, struct mbuf *m)
 	struct lagg_softc *sc = (struct lagg_softc *)ifp->if_softc;
 	int error;
 
-#ifdef RATELIMIT
+#if defined(KERN_TLS) || defined(RATELIMIT)
 	if (m->m_pkthdr.csum_flags & CSUM_SND_TAG)
 		MPASS(m->m_pkthdr.snd_tag->ifp == ifp);
 #endif
@@ -1955,12 +1986,14 @@ lagg_link_active(struct lagg_softc *sc, struct lagg_port *lp)
 	 * Search a port which reports an active link state.
 	 */
 
+#ifdef INVARIANTS
 	/*
 	 * This is called with either LAGG_RLOCK() held or
 	 * LAGG_XLOCK(sc) held.
 	 */
 	if (!in_epoch(net_epoch_preempt))
 		LAGG_XLOCK_ASSERT(sc);
+#endif
 
 	if (lp == NULL)
 		goto search;
@@ -1988,7 +2021,7 @@ int
 lagg_enqueue(struct ifnet *ifp, struct mbuf *m)
 {
 
-#ifdef RATELIMIT
+#if defined(KERN_TLS) || defined(RATELIMIT)
 	if (m->m_pkthdr.csum_flags & CSUM_SND_TAG) {
 		struct lagg_snd_tag *lst;
 		struct m_snd_tag *mst;
@@ -2013,7 +2046,6 @@ static void
 lagg_rr_attach(struct lagg_softc *sc)
 {
 	sc->sc_seq = 0;
-	sc->sc_bkt_count = sc->sc_bkt;
 }
 
 static int
@@ -2022,17 +2054,9 @@ lagg_rr_start(struct lagg_softc *sc, struct mbuf *m)
 	struct lagg_port *lp;
 	uint32_t p;
 
-	if (sc->sc_bkt_count == 0 && sc->sc_bkt > 0)
-		sc->sc_bkt_count = sc->sc_bkt;
-
-	if (sc->sc_bkt > 0) {
-		atomic_subtract_int(&sc->sc_bkt_count, 1);
-	if (atomic_cmpset_int(&sc->sc_bkt_count, 0, sc->sc_bkt))
-		p = atomic_fetchadd_32(&sc->sc_seq, 1);
-	else
-		p = sc->sc_seq; 
-	} else
-		p = atomic_fetchadd_32(&sc->sc_seq, 1);
+	p = atomic_fetchadd_32(&sc->sc_seq, 1);
+	if (sc->sc_stride > 0)
+		p /= sc->sc_stride;
 
 	p %= sc->sc_count;
 	lp = CK_SLIST_FIRST(&sc->sc_ports);

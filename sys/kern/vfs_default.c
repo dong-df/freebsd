@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/buf.h>
 #include <sys/conf.h>
 #include <sys/event.h>
+#include <sys/filio.h>
 #include <sys/kernel.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
@@ -83,6 +84,7 @@ static int	dirent_exists(struct vnode *vp, const char *dirname,
 static int vop_stdis_text(struct vop_is_text_args *ap);
 static int vop_stdunset_text(struct vop_unset_text_args *ap);
 static int vop_stdadd_writecount(struct vop_add_writecount_args *ap);
+static int vop_stdcopy_file_range(struct vop_copy_file_range_args *ap);
 static int vop_stdfdatasync(struct vop_fdatasync_args *ap);
 static int vop_stdgetpages_async(struct vop_getpages_async_args *ap);
 
@@ -117,7 +119,8 @@ struct vop_vector default_vnodeops = {
 	.vop_getpages_async =	vop_stdgetpages_async,
 	.vop_getwritemount = 	vop_stdgetwritemount,
 	.vop_inactive =		VOP_NULL,
-	.vop_ioctl =		VOP_ENOTTY,
+	.vop_need_inactive =	vop_stdneed_inactive,
+	.vop_ioctl =		vop_stdioctl,
 	.vop_kqfilter =		vop_stdkqfilter,
 	.vop_islocked =		vop_stdislocked,
 	.vop_lock1 =		vop_stdlock,
@@ -140,7 +143,9 @@ struct vop_vector default_vnodeops = {
 	.vop_set_text =		vop_stdset_text,
 	.vop_unset_text =	vop_stdunset_text,
 	.vop_add_writecount =	vop_stdadd_writecount,
+	.vop_copy_file_range =	vop_stdcopy_file_range,
 };
+VFS_VOP_VECTOR_REGISTER(default_vnodeops);
 
 /*
  * Series of placeholder functions for various error returns for
@@ -540,6 +545,71 @@ vop_stdislocked(ap)
 }
 
 /*
+ * Variants of the above set.
+ *
+ * Differences are:
+ * - shared locking disablement is not supported
+ * - v_vnlock pointer is not honored
+ */
+int
+vop_lock(ap)
+	struct vop_lock1_args /* {
+		struct vnode *a_vp;
+		int a_flags;
+		char *file;
+		int line;
+	} */ *ap;
+{
+	struct vnode *vp = ap->a_vp;
+	int flags = ap->a_flags;
+	struct mtx *ilk;
+
+	MPASS(vp->v_vnlock == &vp->v_lock);
+
+	if (__predict_false((flags & ~(LK_TYPE_MASK | LK_NODDLKTREAT | LK_RETRY)) != 0))
+		goto other;
+
+	switch (flags & LK_TYPE_MASK) {
+	case LK_SHARED:
+		return (lockmgr_slock(&vp->v_lock, flags, ap->a_file, ap->a_line));
+	case LK_EXCLUSIVE:
+		return (lockmgr_xlock(&vp->v_lock, flags, ap->a_file, ap->a_line));
+	}
+other:
+	ilk = VI_MTX(vp);
+	return (lockmgr_lock_fast_path(&vp->v_lock, flags,
+	    &ilk->lock_object, ap->a_file, ap->a_line));
+}
+
+int
+vop_unlock(ap)
+	struct vop_unlock_args /* {
+		struct vnode *a_vp;
+		int a_flags;
+	} */ *ap;
+{
+	struct vnode *vp = ap->a_vp;
+
+	MPASS(vp->v_vnlock == &vp->v_lock);
+	MPASS(ap->a_flags == 0);
+
+	return (lockmgr_unlock(&vp->v_lock));
+}
+
+int
+vop_islocked(ap)
+	struct vop_islocked_args /* {
+		struct vnode *a_vp;
+	} */ *ap;
+{
+	struct vnode *vp = ap->a_vp;
+
+	MPASS(vp->v_vnlock == &vp->v_lock);
+
+	return (lockstatus(&vp->v_lock));
+}
+
+/*
  * Return true for select/poll.
  */
 int
@@ -583,19 +653,38 @@ vop_stdgetwritemount(ap)
 	} */ *ap;
 {
 	struct mount *mp;
+	struct vnode *vp;
 
 	/*
-	 * XXX Since this is called unlocked we may be recycled while
-	 * attempting to ref the mount.  If this is the case or mountpoint
-	 * will be set to NULL.  We only have to prevent this call from
-	 * returning with a ref to an incorrect mountpoint.  It is not
-	 * harmful to return with a ref to our previous mountpoint.
+	 * Note that having a reference does not prevent forced unmount from
+	 * setting ->v_mount to NULL after the lock gets released. This is of
+	 * no consequence for typical consumers (most notably vn_start_write)
+	 * since in this case the vnode is VIRF_DOOMED. Unmount might have
+	 * progressed far enough that its completion is only delayed by the
+	 * reference obtained here. The consumer only needs to concern itself
+	 * with releasing it.
 	 */
-	mp = ap->a_vp->v_mount;
-	if (mp != NULL) {
-		vfs_ref(mp);
-		if (mp != ap->a_vp->v_mount) {
-			vfs_rel(mp);
+	vp = ap->a_vp;
+	mp = vp->v_mount;
+	if (mp == NULL) {
+		*(ap->a_mpp) = NULL;
+		return (0);
+	}
+	if (vfs_op_thread_enter(mp)) {
+		if (mp == vp->v_mount) {
+			vfs_mp_count_add_pcpu(mp, ref, 1);
+			vfs_op_thread_exit(mp);
+		} else {
+			vfs_op_thread_exit(mp);
+			mp = NULL;
+		}
+	} else {
+		MNT_ILOCK(mp);
+		if (mp == vp->v_mount) {
+			MNT_REF(mp);
+			MNT_IUNLOCK(mp);
+		} else {
+			MNT_IUNLOCK(mp);
 			mp = NULL;
 		}
 	}
@@ -603,7 +692,13 @@ vop_stdgetwritemount(ap)
 	return (0);
 }
 
-/* XXX Needs good comment and VOP_BMAP(9) manpage */
+/*
+ * If the file system doesn't implement VOP_BMAP, then return sensible defaults:
+ * - Return the vnode's bufobj instead of any underlying device's bufobj
+ * - Calculate the physical block number as if there were equal size
+ *   consecutive blocks, but
+ * - Report no contiguous runs of blocks.
+ */
 int
 vop_stdbmap(ap)
 	struct vop_bmap_args /* {
@@ -989,7 +1084,7 @@ vop_stdadvise(struct vop_advise_args *ap)
 	case POSIX_FADV_DONTNEED:
 		error = 0;
 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-		if (vp->v_iflag & VI_DOOMED) {
+		if (VN_IS_DOOMED(vp)) {
 			VOP_UNLOCK(vp, 0);
 			break;
 		}
@@ -1074,6 +1169,7 @@ int
 vop_stdset_text(struct vop_set_text_args *ap)
 {
 	struct vnode *vp;
+	struct mount *mp;
 	int error;
 
 	vp = ap->a_vp;
@@ -1081,6 +1177,17 @@ vop_stdset_text(struct vop_set_text_args *ap)
 	if (vp->v_writecount > 0) {
 		error = ETXTBSY;
 	} else {
+		/*
+		 * If requested by fs, keep a use reference to the
+		 * vnode until the last text reference is released.
+		 */
+		mp = vp->v_mount;
+		if (mp != NULL && (mp->mnt_kern_flag & MNTK_TEXT_REFS) != 0 &&
+		    vp->v_writecount == 0) {
+			vp->v_iflag |= VI_TEXT_REF;
+			vrefl(vp);
+		}
+
 		vp->v_writecount--;
 		error = 0;
 	}
@@ -1093,16 +1200,25 @@ vop_stdunset_text(struct vop_unset_text_args *ap)
 {
 	struct vnode *vp;
 	int error;
+	bool last;
 
 	vp = ap->a_vp;
+	last = false;
 	VI_LOCK(vp);
 	if (vp->v_writecount < 0) {
+		if ((vp->v_iflag & VI_TEXT_REF) != 0 &&
+		    vp->v_writecount == -1) {
+			last = true;
+			vp->v_iflag &= ~VI_TEXT_REF;
+		}
 		vp->v_writecount++;
 		error = 0;
 	} else {
 		error = EINVAL;
 	}
 	VI_UNLOCK(vp);
+	if (last)
+		vunref(vp);
 	return (error);
 }
 
@@ -1113,7 +1229,7 @@ vop_stdadd_writecount(struct vop_add_writecount_args *ap)
 	int error;
 
 	vp = ap->a_vp;
-	VI_LOCK(vp);
+	VI_LOCK_FLAGS(vp, MTX_DUPOK);
 	if (vp->v_writecount < 0) {
 		error = ETXTBSY;
 	} else {
@@ -1123,6 +1239,48 @@ vop_stdadd_writecount(struct vop_add_writecount_args *ap)
 		error = 0;
 	}
 	VI_UNLOCK(vp);
+	return (error);
+}
+
+int
+vop_stdneed_inactive(struct vop_need_inactive_args *ap)
+{
+
+	return (1);
+}
+
+int
+vop_stdioctl(struct vop_ioctl_args *ap)
+{
+	struct vnode *vp;
+	struct vattr va;
+	off_t *offp;
+	int error;
+
+	switch (ap->a_command) {
+	case FIOSEEKDATA:
+	case FIOSEEKHOLE:
+		vp = ap->a_vp;
+		error = vn_lock(vp, LK_SHARED);
+		if (error != 0)
+			return (EBADF);
+		if (vp->v_type == VREG)
+			error = VOP_GETATTR(vp, &va, ap->a_cred);
+		else
+			error = ENOTTY;
+		if (error == 0) {
+			offp = ap->a_data;
+			if (*offp < 0 || *offp >= va.va_size)
+				error = ENXIO;
+			else if (ap->a_command == FIOSEEKHOLE)
+				*offp = va.va_size;
+		}
+		VOP_UNLOCK(vp, 0);
+		break;
+	default:
+		error = ENOTTY;
+		break;
+	}
 	return (error);
 }
 
@@ -1204,6 +1362,17 @@ vfs_stdnosync (mp, waitfor)
 {
 
 	return (0);
+}
+
+static int
+vop_stdcopy_file_range(struct vop_copy_file_range_args *ap)
+{
+	int error;
+
+	error = vn_generic_copy_file_range(ap->a_invp, ap->a_inoffp,
+	    ap->a_outvp, ap->a_outoffp, ap->a_lenp, ap->a_flags, ap->a_incred,
+	    ap->a_outcred, ap->a_fsizetd);
+	return (error);
 }
 
 int

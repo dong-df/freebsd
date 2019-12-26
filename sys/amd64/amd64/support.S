@@ -671,13 +671,7 @@ END(fillw)
 	movq	$copy_fault,PCB_ONFAULT(%r11)
 
 	/*
-	 * Check explicitly for non-user addresses.  If 486 write protection
-	 * is being used, this check is essential because we are in kernel
-	 * mode so the h/w does not provide any protection against writing
-	 * kernel addresses.
-	 */
-
-	/*
+	 * Check explicitly for non-user addresses.
 	 * First, prevent address wrapping.
 	 */
 	movq	%rsi,%rax
@@ -811,6 +805,7 @@ ENTRY(casueword32_nosmap)
 	lock
 #endif
 	cmpxchgl %ecx,(%rdi)			/* new = %ecx */
+	setne	%cl
 
 	/*
 	 * The old value is in %eax.  If the store succeeded it will be the
@@ -828,6 +823,7 @@ ENTRY(casueword32_nosmap)
 	 */
 	movl	%esi,(%rdx)			/* oldp = %rdx */
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword32_nosmap)
 
@@ -847,6 +843,7 @@ ENTRY(casueword32_smap)
 #endif
 	cmpxchgl %ecx,(%rdi)			/* new = %ecx */
 	clac
+	setne	%cl
 
 	/*
 	 * The old value is in %eax.  If the store succeeded it will be the
@@ -864,6 +861,7 @@ ENTRY(casueword32_smap)
 	 */
 	movl	%esi,(%rdx)			/* oldp = %rdx */
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword32_smap)
 
@@ -886,6 +884,7 @@ ENTRY(casueword_nosmap)
 	lock
 #endif
 	cmpxchgq %rcx,(%rdi)			/* new = %rcx */
+	setne	%cl
 
 	/*
 	 * The old value is in %rax.  If the store succeeded it will be the
@@ -897,6 +896,7 @@ ENTRY(casueword_nosmap)
 	movq	%rax,PCB_ONFAULT(%r8)
 	movq	%rsi,(%rdx)
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword_nosmap)
 
@@ -916,6 +916,7 @@ ENTRY(casueword_smap)
 #endif
 	cmpxchgq %rcx,(%rdi)			/* new = %rcx */
 	clac
+	setne	%cl
 
 	/*
 	 * The old value is in %rax.  If the store succeeded it will be the
@@ -927,6 +928,7 @@ ENTRY(casueword_smap)
 	movq	%rax,PCB_ONFAULT(%r8)
 	movq	%rsi,(%rdx)
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword_smap)
 

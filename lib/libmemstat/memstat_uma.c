@@ -201,6 +201,7 @@ retry:
 		mtp->mt_numfrees = uthp->uth_frees;
 		mtp->mt_failures = uthp->uth_fails;
 		mtp->mt_sleeps = uthp->uth_sleeps;
+		mtp->mt_xdomain = uthp->uth_xdomain;
 
 		for (j = 0; j < maxcpus; j++) {
 			upsp = (struct uma_percpu_stat *)p;
@@ -423,11 +424,11 @@ memstat_kvm_uma(struct memory_type_list *list, void *kvm_handle)
 			mtp->mt_failures = kvm_counter_u64_fetch(kvm,
 			    (unsigned long )uz.uz_fails);
 			mtp->mt_sleeps = uz.uz_sleeps;
-
 			/* See comment above in memstat_sysctl_uma(). */
 			if (mtp->mt_numallocs < mtp->mt_numfrees)
 				mtp->mt_numallocs = mtp->mt_numfrees;
 
+			mtp->mt_xdomain = uz.uz_xdomain;
 			if (kz.uk_flags & UMA_ZFLAG_INTERNAL)
 				goto skip_percpu;
 			for (i = 0; i < mp_maxid + 1; i++) {
@@ -437,28 +438,9 @@ memstat_kvm_uma(struct memory_type_list *list, void *kvm_handle)
 				mtp->mt_numallocs += ucp->uc_allocs;
 				mtp->mt_numfrees += ucp->uc_frees;
 
-				if (ucp->uc_allocbucket != NULL) {
-					ret = kread(kvm, ucp->uc_allocbucket,
-					    &ub, sizeof(ub), 0);
-					if (ret != 0) {
-						free(ucp_array);
-						_memstat_mtl_empty(list);
-						list->mtl_error = ret;
-						return (-1);
-					}
-					mtp->mt_free += ub.ub_cnt;
-				}
-				if (ucp->uc_freebucket != NULL) {
-					ret = kread(kvm, ucp->uc_freebucket,
-					    &ub, sizeof(ub), 0);
-					if (ret != 0) {
-						free(ucp_array);
-						_memstat_mtl_empty(list);
-						list->mtl_error = ret;
-						return (-1);
-					}
-					mtp->mt_free += ub.ub_cnt;
-				}
+				mtp->mt_free += ucp->uc_allocbucket.ucb_cnt;
+				mtp->mt_free += ucp->uc_freebucket.ucb_cnt;
+				mtp->mt_free += ucp->uc_crossbucket.ucb_cnt;
 			}
 skip_percpu:
 			mtp->mt_size = kz.uk_size;
@@ -473,9 +455,9 @@ skip_percpu:
 				ret = kread(kvm, &uz.uz_domain[i], &uzd,
 				   sizeof(uzd), 0);
 				for (ubp =
-				    LIST_FIRST(&uzd.uzd_buckets);
+				    TAILQ_FIRST(&uzd.uzd_buckets);
 				    ubp != NULL;
-				    ubp = LIST_NEXT(&ub, ub_link)) {
+				    ubp = TAILQ_NEXT(&ub, ub_link)) {
 					ret = kread(kvm, ubp, &ub,
 					   sizeof(ub), 0);
 					mtp->mt_zonefree += ub.ub_cnt;

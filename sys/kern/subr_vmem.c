@@ -466,6 +466,7 @@ static void
 bt_remseg(vmem_t *vm, bt_t *bt)
 {
 
+	MPASS(bt->bt_type != BT_TYPE_CURSOR);
 	TAILQ_REMOVE(&vm->vm_seglist, bt, bt_seglist);
 	bt_free(vm, bt);
 }
@@ -588,7 +589,7 @@ qc_drain(vmem_t *vm)
 
 	qcache_idx_max = vm->vm_qcache_max >> vm->vm_quantum_shift;
 	for (i = 0; i < qcache_idx_max; i++)
-		zone_drain(vm->vm_qcache[i].qc_cache);
+		uma_zone_reclaim(vm->vm_qcache[i].qc_cache, UMA_RECLAIM_DRAIN);
 }
 
 #ifndef UMA_MD_SMALL_ALLOC
@@ -669,8 +670,8 @@ int
 vmem_startup_count(void)
 {
 
-	return (howmany(BT_MAXALLOC,
-	    UMA_SLAB_SPACE / sizeof(struct vmem_btag)));
+	return (howmany(BT_MAXALLOC, slab_ipers(sizeof(struct vmem_btag),
+	    UMA_ALIGN_PTR)));
 }
 #endif
 
@@ -843,6 +844,7 @@ vmem_destroy1(vmem_t *vm)
 	VMEM_LOCK(vm);
 	MPASS(vm->vm_nbusytag == 0);
 
+	TAILQ_REMOVE(&vm->vm_seglist, &vm->vm_cursor, bt_seglist);
 	while ((bt = TAILQ_FIRST(&vm->vm_seglist)) != NULL)
 		bt_remseg(vm, bt);
 

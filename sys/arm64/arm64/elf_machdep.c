@@ -55,6 +55,8 @@ __FBSDID("$FreeBSD$");
 
 #include "linker_if.h"
 
+u_long elf_hwcap;
+
 static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_size	= SYS_MAXSYSCALL,
 	.sv_table	= sysent,
@@ -74,6 +76,7 @@ static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_usrstack	= USRSTACK,
 	.sv_psstrings	= PS_STRINGS,
 	.sv_stackprot	= VM_PROT_READ | VM_PROT_WRITE,
+	.sv_copyout_auxargs = __elfN(freebsd_copyout_auxargs),
 	.sv_copyout_strings = exec_copyout_strings,
 	.sv_setregs	= exec_setregs,
 	.sv_fixlimit	= NULL,
@@ -88,6 +91,7 @@ static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_schedtail	= NULL,
 	.sv_thread_detach = NULL,
 	.sv_trap	= NULL,
+	.sv_hwcap	= &elf_hwcap,
 };
 INIT_SYSENTVEC(elf64_sysvec, &elf64_freebsd_sysvec);
 
@@ -208,6 +212,13 @@ elf_cpu_load_file(linker_file_t lf)
 
 int
 elf_cpu_unload_file(linker_file_t lf __unused)
+{
+
+	return (0);
+}
+
+int
+elf_cpu_parse_dynamic(linker_file_t lf __unused, Elf_Dyn *dynamic __unused)
 {
 
 	return (0);

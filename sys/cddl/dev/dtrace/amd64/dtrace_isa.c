@@ -505,7 +505,11 @@ dtrace_getreg(struct trapframe *rp, uint_t reg)
 		REG_SS		/* 18 SS */
 	};
 
+#ifdef illumos
 	if (reg <= SS) {
+#else	/* !illumos */
+	if (reg <= GS) {
+#endif
 		if (reg >= sizeof (regmap) / sizeof (int)) {
 			DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);
 			return (0);
@@ -514,7 +518,11 @@ dtrace_getreg(struct trapframe *rp, uint_t reg)
 		reg = regmap[reg];
 	} else {
 		/* This is dependent on reg.d. */
+#ifdef illumos
 		reg -= SS + 1;
+#else	/* !illumos */
+		reg -= GS + 1;
+#endif
 	}
 
 	switch (reg) {

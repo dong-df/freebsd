@@ -248,6 +248,10 @@
                     ustack
                     ..
                 ..
+                amd64
+                    arrays
+                    ..
+                ..
             ..
             zfsd
             ..
@@ -380,6 +384,8 @@
         ..
         libdevdctl
         ..
+        libexecinfo
+        ..
         libkvm
         ..
         libmp
@@ -435,6 +441,10 @@
         pfctl
             files
             ..
+        ..
+        ping
+        ..
+        ping6
         ..
     ..
     secure
@@ -718,6 +728,8 @@
                 ..
             ..
         ..
+        devrandom
+        ..
         dtrace
         ..
         fifo
@@ -725,6 +737,8 @@
         file
         ..
         fs
+            fusefs
+            ..
             tmpfs
             ..
         ..
@@ -739,6 +753,8 @@
                 gpt
                 ..
                 mirror
+                ..
+                multipath
                 ..
                 nop
                 ..
@@ -780,6 +796,10 @@
         ..
         netinet
         ..
+        netinet6
+            frag6
+            ..
+        ..
         netipsec
             tunnel
             ..
@@ -787,6 +807,8 @@
     netmap
     ..
         netpfil
+            common
+            ..
             pf
                 ioctl
                 ..
@@ -996,6 +1018,8 @@
         ..
         limits
         ..
+        locale
+        ..
         m4
         ..
         mkimg
@@ -1003,6 +1027,8 @@
         ncal
         ..
         opensm
+        ..
+        patch
         ..
         pr
         ..
@@ -1040,6 +1066,8 @@
         ..
         uuencode
         ..
+        unifdef
+        ..
         uniq
         ..
         vmstat
@@ -1064,7 +1092,11 @@
         ..
         fstyp
         ..
+        jail
+        ..
         makefs
+        ..
+        mixer
         ..
         newsyslog
         ..

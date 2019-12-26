@@ -216,7 +216,7 @@ bounce_bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 		if (ptoa(bz->total_bpages) < maxsize) {
 			int pages;
 
-			pages = atop(maxsize) - bz->total_bpages;
+			pages = atop(round_page(maxsize)) - bz->total_bpages;
 
 			/* Add pages to our bounce pool */
 			if (alloc_bounce_pages(newtag, pages) < pages)
@@ -660,7 +660,7 @@ _bus_dmamap_reserve_pages(bus_dma_tag_t dmat, bus_dmamap_t map, int flags)
 /*
  * Add a single contiguous physical range to the segment list.
  */
-static int
+static bus_size_t
 _bus_dmamap_addseg(bus_dma_tag_t dmat, bus_dmamap_t map, bus_addr_t curaddr,
     bus_size_t sgsize, bus_dma_segment_t *segs, int *segp)
 {

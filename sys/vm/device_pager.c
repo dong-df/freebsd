@@ -235,9 +235,7 @@ cdev_pager_free_page(vm_object_t object, vm_page_t m)
 	if (object->type == OBJT_MGTDEVICE) {
 		KASSERT((m->oflags & VPO_UNMANAGED) == 0, ("unmanaged %p", m));
 		pmap_remove_all(m);
-		vm_page_lock(m);
-		vm_page_remove(m);
-		vm_page_unlock(m);
+		(void)vm_page_remove(m);
 	} else if (object->type == OBJT_DEVICE)
 		dev_pager_free_page(object, m);
 }
@@ -272,8 +270,12 @@ dev_pager_dealloc(vm_object_t object)
 		 * Free up our fake pages.
 		 */
 		while ((m = TAILQ_FIRST(&object->un_pager.devp.devp_pglist))
-		    != NULL)
+		    != NULL) {
+			if (vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL) == 0)
+				continue;
+
 			dev_pager_free_page(object, m);
+		}
 	}
 	object->handle = NULL;
 	object->type = OBJT_DEAD;
@@ -392,13 +394,10 @@ old_dev_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 		 */
 		page = vm_page_getfake(paddr, memattr);
 		VM_OBJECT_WLOCK(object);
-		vm_page_replace_checked(page, object, (*mres)->pindex, *mres);
-		vm_page_lock(*mres);
-		vm_page_free(*mres);
-		vm_page_unlock(*mres);
+		vm_page_replace(page, object, (*mres)->pindex, *mres);
 		*mres = page;
 	}
-	page->valid = VM_PAGE_BITS_ALL;
+	vm_page_valid(page);
 	return (VM_PAGER_OK);
 }
 

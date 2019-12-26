@@ -109,6 +109,8 @@ linux_common_open(struct thread *td, int dirfd, char *path, int l_flags, int mod
 		bsd_flags |= O_APPEND;
 	if (l_flags & LINUX_O_SYNC)
 		bsd_flags |= O_FSYNC;
+	if (l_flags & LINUX_O_CLOEXEC)
+		bsd_flags |= O_CLOEXEC;
 	if (l_flags & LINUX_O_NONBLOCK)
 		bsd_flags |= O_NONBLOCK;
 	if (l_flags & LINUX_FASYNC)
@@ -130,7 +132,12 @@ linux_common_open(struct thread *td, int dirfd, char *path, int l_flags, int mod
 	/* XXX LINUX_O_NOATIME: unable to be easily implemented. */
 
 	error = kern_openat(td, dirfd, path, UIO_SYSSPACE, bsd_flags, mode);
-	if (error != 0)
+	if (error != 0) {
+		if (error == EMLINK)
+			error = ELOOP;
+		goto done;
+	}
+	if (p->p_flag & P_CONTROLT)
 		goto done;
 	if (bsd_flags & O_NOCTTY)
 		goto done;
@@ -686,8 +693,35 @@ linux_rename(struct thread *td, struct linux_rename_args *args)
 int
 linux_renameat(struct thread *td, struct linux_renameat_args *args)
 {
+	struct linux_renameat2_args renameat2_args = {
+	    .olddfd = args->olddfd,
+	    .oldname = args->oldname,
+	    .newdfd = args->newdfd,
+	    .newname = args->newname,
+	    .flags = 0
+	};
+
+	return (linux_renameat2(td, &renameat2_args));
+}
+
+int
+linux_renameat2(struct thread *td, struct linux_renameat2_args *args)
+{
 	char *from, *to;
 	int error, olddfd, newdfd;
+
+	if (args->flags != 0) {
+		if (args->flags & ~(LINUX_RENAME_EXCHANGE |
+		    LINUX_RENAME_NOREPLACE | LINUX_RENAME_WHITEOUT))
+			return (EINVAL);
+		if (args->flags & LINUX_RENAME_EXCHANGE &&
+		    args->flags & (LINUX_RENAME_NOREPLACE |
+		    LINUX_RENAME_WHITEOUT))
+			return (EINVAL);
+		linux_msg(td, "renameat2 unsupported flags 0x%x",
+		    args->flags);
+		return (EINVAL);
+	}
 
 	olddfd = (args->olddfd == LINUX_AT_FDCWD) ? AT_FDCWD : args->olddfd;
 	newdfd = (args->newdfd == LINUX_AT_FDCWD) ? AT_FDCWD : args->newdfd;
@@ -865,10 +899,22 @@ linux_linkat(struct thread *td, struct linux_linkat_args *args)
 }
 
 int
-linux_fdatasync(td, uap)
-	struct thread *td;
-	struct linux_fdatasync_args *uap;
+linux_fdatasync(struct thread *td, struct linux_fdatasync_args *uap)
 {
+
+	return (kern_fsync(td, uap->fd, false));
+}
+
+int
+linux_sync_file_range(struct thread *td, struct linux_sync_file_range_args *uap)
+{
+
+	if (uap->offset < 0 || uap->nbytes < 0 ||
+	    (uap->flags & ~(LINUX_SYNC_FILE_RANGE_WAIT_BEFORE |
+	    LINUX_SYNC_FILE_RANGE_WRITE |
+	    LINUX_SYNC_FILE_RANGE_WAIT_AFTER)) != 0) {
+		return (EINVAL);
+	}
 
 	return (kern_fsync(td, uap->fd, false));
 }
